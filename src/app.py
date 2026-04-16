@@ -7,13 +7,16 @@ import streamlit as st
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 DIVERGENCE_PATH = BASE_DIR / "outputs" / "distribution_divergence.csv"
-AI_SKILL_SOURCE_PATH = BASE_DIR / "outputs" / "skill_distributions2.csv"
+SKILL_DISTRIBUTIONS_PATH = BASE_DIR / "outputs" / "skill_distributions2.csv"
+FELTEN_EXPOSURE_PATH = BASE_DIR / "outputs" / "felten_language_modeling_aioe.csv"
+AI_SKILL_SOURCE_PATH = SKILL_DISTRIBUTIONS_PATH
 DATASCIENTIST_COOCCUR_PATH = BASE_DIR / "outputs" / "datascientist_cooccur.csv"
 AI_ML_SUBCATEGORY_NAME = "Artificial Intelligence and Machine Learning (AI/ML)"
 
 VIEW_LABELS = {
     "divergence": "Occupation Divergence",
     "ai_ml_cooccurrence": "AI/ML Co-occurrence",
+    "occupation_similarity": "Occupation Similarity",
 }
 METRIC_LABELS = {
     "KL_FROM_PREVIOUS": "Quarter-on-quarter KL divergence",
@@ -47,6 +50,57 @@ def load_ai_ml_skill_names(path: Path) -> pd.Series:
         .sort_values()
         .reset_index(drop=True)
     )
+
+
+@st.cache_data(show_spinner="Loading occupation skill distributions...")
+def load_skill_distribution_data(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(
+        path,
+        usecols=[
+            "YEAR",
+            "QUARTER",
+            "ONET_2019",
+            "ONET_2019_NAME",
+            "SKILL_ID",
+            "SKILL_NAME",
+            "CNT",
+        ],
+    )
+    df["YEAR"] = df["YEAR"].astype(int)
+    df["QUARTER"] = df["QUARTER"].astype(int)
+    df["CNT"] = pd.to_numeric(df["CNT"], errors="coerce").fillna(0.0)
+    df["SKILL_KEY"] = df["SKILL_ID"].fillna(df["SKILL_NAME"])
+    df["SOC_CODE"] = df["ONET_2019"].str.replace(r"\.\d+$", "", regex=True)
+    soc_labels = (
+        df[["SOC_CODE", "ONET_2019_NAME"]]
+        .dropna()
+        .sort_values(["SOC_CODE", "ONET_2019_NAME"])
+        .drop_duplicates(subset=["SOC_CODE"])
+        .rename(columns={"ONET_2019_NAME": "SOC_OCCUPATION_NAME"})
+    )
+    df = df.merge(soc_labels, on="SOC_CODE", how="left")
+    df["SOC_LABEL"] = df["SOC_OCCUPATION_NAME"] + " (" + df["SOC_CODE"] + ")"
+    df["QUARTER_LABEL"] = "Q" + df["QUARTER"].astype(str) + " " + df["YEAR"].astype(str)
+    df["OCCUPATION_LABEL"] = df["ONET_2019_NAME"] + " (" + df["ONET_2019"] + ")"
+    return df.sort_values(["YEAR", "QUARTER", "OCCUPATION_LABEL", "SKILL_KEY"]).reset_index(drop=True)
+
+
+@st.cache_data(show_spinner="Loading Felten exposure data...")
+def load_felten_exposure_data(path: Path) -> pd.DataFrame:
+    df = pd.read_csv(
+        path,
+        usecols=["SOC Code", "Occupation Title", "Language Modeling AIOE"],
+    ).rename(
+        columns={
+            "SOC Code": "SOC_CODE",
+            "Occupation Title": "FELTEN_OCCUPATION_TITLE",
+            "Language Modeling AIOE": "LM_AIOE",
+        }
+    )
+    df["SOC_CODE"] = df["SOC_CODE"].astype(str)
+    df["SOC_LABEL"] = df["FELTEN_OCCUPATION_TITLE"] + " (" + df["SOC_CODE"] + ")"
+    df["LM_AIOE"] = pd.to_numeric(df["LM_AIOE"], errors="coerce")
+    return df.dropna(subset=["SOC_CODE", "LM_AIOE"]).sort_values("SOC_CODE").reset_index(drop=True)
 
 
 @st.cache_data(show_spinner="Loading AI/ML co-occurrence data...")
@@ -122,6 +176,212 @@ def load_ai_ml_cooccurrence_data(skill_source_path: Path, cooccur_path: Path) ->
     ).start_time
 
     return relevant.sort_values(["YEAR", "QUARTER", "OTHER_SKILL", "AI_SKILL"]).reset_index(drop=True)
+
+
+def build_quarter_skill_data(df: pd.DataFrame, year: int, quarter: int) -> pd.DataFrame:
+    quarter_df = df[(df["YEAR"] == year) & (df["QUARTER"] == quarter)].copy()
+    if quarter_df.empty:
+        return quarter_df
+
+    return (
+        quarter_df.groupby(
+            [
+                "YEAR",
+                "QUARTER",
+                "QUARTER_LABEL",
+                "SOC_CODE",
+                "SOC_OCCUPATION_NAME",
+                "SOC_LABEL",
+                "SKILL_KEY",
+                "SKILL_NAME",
+            ],
+            as_index=False,
+        )["CNT"]
+        .sum()
+        .sort_values(["SOC_LABEL", "SKILL_KEY"])
+        .reset_index(drop=True)
+    )
+
+
+def build_similar_occupation_table(
+    quarter_skill_data: pd.DataFrame,
+    selected_occupation_label: str,
+    top_n: int | None = 3,
+) -> pd.DataFrame:
+    occupation_cols = ["SOC_CODE", "SOC_OCCUPATION_NAME", "SOC_LABEL"]
+    selected = quarter_skill_data[quarter_skill_data["SOC_LABEL"] == selected_occupation_label][
+        occupation_cols + ["SKILL_KEY", "SKILL_NAME", "CNT"]
+    ].copy()
+    if selected.empty:
+        return pd.DataFrame()
+
+    selected_norm = float((selected["CNT"] ** 2).sum() ** 0.5)
+    if selected_norm == 0.0:
+        return pd.DataFrame()
+
+    others = quarter_skill_data[quarter_skill_data["SOC_LABEL"] != selected_occupation_label][
+        occupation_cols + ["SKILL_KEY", "CNT"]
+    ].copy()
+    if others.empty:
+        return pd.DataFrame()
+
+    selected_counts = selected[["SKILL_KEY", "CNT"]].rename(columns={"CNT": "SELECTED_CNT"})
+    shared = others.merge(selected_counts, on="SKILL_KEY", how="inner")
+    if shared.empty:
+        return pd.DataFrame()
+
+    similarity = (
+        shared.assign(DOT_COMPONENT=shared["CNT"] * shared["SELECTED_CNT"])
+        .groupby(occupation_cols, as_index=False)
+        .agg(
+            DOT_PRODUCT=("DOT_COMPONENT", "sum"),
+            SHARED_SKILL_COUNT=("SKILL_KEY", "nunique"),
+        )
+    )
+    norms = (
+        others.groupby(occupation_cols, as_index=False)
+        .agg(
+            CANDIDATE_NORM=("CNT", lambda series: float((series**2).sum() ** 0.5)),
+            CANDIDATE_TOTAL_COUNT=("CNT", "sum"),
+            CANDIDATE_ACTIVE_SKILLS=("SKILL_KEY", "nunique"),
+        )
+    )
+    similarity = similarity.merge(norms, on=occupation_cols, how="inner")
+    similarity["COSINE_SIMILARITY"] = similarity["DOT_PRODUCT"] / (
+        similarity["CANDIDATE_NORM"] * selected_norm
+    )
+    ranked = (
+        similarity[similarity["COSINE_SIMILARITY"] > 0]
+        .sort_values(["COSINE_SIMILARITY", "SHARED_SKILL_COUNT", "SOC_LABEL"], ascending=[False, False, True])
+        .reset_index(drop=True)
+    )
+    return ranked.head(top_n).reset_index(drop=True) if top_n is not None else ranked
+
+
+def build_skill_gap_table(
+    quarter_skill_data: pd.DataFrame,
+    selected_occupation_label: str,
+    comparison_occupation_label: str,
+    top_n: int = 10,
+) -> pd.DataFrame:
+    selected = quarter_skill_data[quarter_skill_data["SOC_LABEL"] == selected_occupation_label][
+        ["SKILL_KEY", "SKILL_NAME", "CNT"]
+    ].copy()
+    comparison = quarter_skill_data[quarter_skill_data["SOC_LABEL"] == comparison_occupation_label][
+        ["SKILL_KEY", "SKILL_NAME", "CNT"]
+    ].copy()
+    if selected.empty or comparison.empty:
+        return pd.DataFrame()
+
+    selected_total = float(selected["CNT"].sum())
+    comparison_total = float(comparison["CNT"].sum())
+
+    merged = selected.merge(
+        comparison,
+        on="SKILL_KEY",
+        how="outer",
+        suffixes=("_SELECTED", "_COMPARISON"),
+    )
+    merged["SKILL_NAME"] = merged["SKILL_NAME_SELECTED"].fillna(merged["SKILL_NAME_COMPARISON"])
+    merged["CNT_SELECTED"] = merged["CNT_SELECTED"].fillna(0.0)
+    merged["CNT_COMPARISON"] = merged["CNT_COMPARISON"].fillna(0.0)
+    merged["SELECTED_SHARE"] = merged["CNT_SELECTED"] / selected_total if selected_total else 0.0
+    merged["COMPARISON_SHARE"] = merged["CNT_COMPARISON"] / comparison_total if comparison_total else 0.0
+    merged["SHARE_GAP"] = merged["COMPARISON_SHARE"] - merged["SELECTED_SHARE"]
+    merged["ABS_SHARE_GAP"] = merged["SHARE_GAP"].abs()
+    merged["GAP_DIRECTION"] = merged["SHARE_GAP"].map(
+        lambda value: comparison_occupation_label if value > 0 else selected_occupation_label
+    )
+    return (
+        merged[
+            [
+                "SKILL_NAME",
+                "CNT_SELECTED",
+                "CNT_COMPARISON",
+                "SELECTED_SHARE",
+                "COMPARISON_SHARE",
+                "SHARE_GAP",
+                "ABS_SHARE_GAP",
+                "GAP_DIRECTION",
+            ]
+        ]
+        .sort_values(["ABS_SHARE_GAP", "SKILL_NAME"], ascending=[False, True])
+        .head(top_n)
+        .reset_index(drop=True)
+    )
+
+
+def build_similarity_exposure_scatter_data(
+    quarter_skill_data: pd.DataFrame,
+    selected_occupation_label: str,
+    exposure_df: pd.DataFrame,
+) -> pd.DataFrame:
+    similarity = build_similar_occupation_table(
+        quarter_skill_data=quarter_skill_data,
+        selected_occupation_label=selected_occupation_label,
+        top_n=None,
+    )
+    if similarity.empty:
+        return similarity
+
+    return (
+        similarity.merge(exposure_df[["SOC_CODE", "FELTEN_OCCUPATION_TITLE", "LM_AIOE"]], on="SOC_CODE", how="inner")
+        .sort_values(["COSINE_SIMILARITY", "LM_AIOE"], ascending=[False, False])
+        .reset_index(drop=True)
+    )
+
+
+def build_similarity_exposure_chart(
+    data: pd.DataFrame,
+    selected_occupation_exposure: float | None = None,
+) -> alt.Chart:
+    point_selection = alt.selection_point(name="transition_select", fields=["SOC_LABEL"])
+    points = (
+        alt.Chart(data)
+        .mark_circle(size=90)
+        .encode(
+            x=alt.X("COSINE_SIMILARITY:Q", title="Cosine similarity to selected occupation"),
+            y=alt.Y("LM_AIOE:Q", title="Felten language-modeling AI exposure"),
+            color=alt.condition(point_selection, alt.value("#d04a02"), alt.value("#1f77b4")),
+            opacity=alt.condition(point_selection, alt.value(1.0), alt.value(0.55)),
+            tooltip=[
+                alt.Tooltip("SOC_LABEL:N", title="Transition occupation"),
+                alt.Tooltip("COSINE_SIMILARITY:Q", title="Cosine similarity", format=".3f"),
+                alt.Tooltip("LM_AIOE:Q", title="LM AIOE", format=".3f"),
+                alt.Tooltip("SHARED_SKILL_COUNT:Q", title="Shared skills", format=","),
+                alt.Tooltip("FELTEN_OCCUPATION_TITLE:N", title="Felten occupation"),
+            ],
+        )
+        .add_params(point_selection)
+    )
+    if selected_occupation_exposure is None or pd.isna(selected_occupation_exposure):
+        return points.properties(height=460)
+
+    rule = alt.Chart(pd.DataFrame({"LM_AIOE": [selected_occupation_exposure]})).mark_rule(
+        color="#888888",
+        strokeDash=[6, 4],
+    ).encode(y="LM_AIOE:Q")
+    return (rule + points).properties(height=460)
+
+
+def extract_selected_occupation_from_event(event: object, valid_labels: list[str]) -> str | None:
+    if not event:
+        return None
+
+    valid = set(valid_labels)
+    stack = [event]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, str):
+            if current in valid:
+                return current
+            continue
+        if isinstance(current, dict):
+            stack.extend(current.values())
+            continue
+        if isinstance(current, list):
+            stack.extend(current)
+    return None
 
 
 def build_time_series_chart(data: pd.DataFrame, metric: str) -> alt.Chart:
@@ -338,13 +598,13 @@ def render_divergence_view() -> None:
     if plotted.empty:
         st.info("Select at least one occupation to draw the time series.")
     else:
-        st.altair_chart(build_time_series_chart(plotted.dropna(subset=[metric]), metric), use_container_width=True)
+        st.altair_chart(build_time_series_chart(plotted.dropna(subset=[metric]), metric), width="stretch")
 
     left_col, right_col = st.columns([1.2, 1.0])
 
     with left_col:
         st.subheader("Quarter Spotlight")
-        st.altair_chart(build_quarter_bar_chart(spotlight, metric), use_container_width=True)
+        st.altair_chart(build_quarter_bar_chart(spotlight, metric), width="stretch")
 
     with right_col:
         st.subheader("Top Occupations")
@@ -359,12 +619,12 @@ def render_divergence_view() -> None:
         st.dataframe(
             summary[["OCCUPATION_LABEL", "Latest quarter", "Latest value", "Peak value", "Mean value"]].head(25),
             hide_index=True,
-            use_container_width=True,
+            width="stretch",
         )
 
     st.subheader("Filtered Data")
     st.dataframe(
-        filtered[
+        filtered.sort_values(["OCCUPATION_LABEL", "YEAR", "QUARTER"])[
             [
                 "OCCUPATION_LABEL",
                 "QUARTER_LABEL",
@@ -374,9 +634,9 @@ def render_divergence_view() -> None:
                 "ACTIVE_SKILL_COUNT",
                 "BASELINE_QUARTER_LABEL",
             ]
-        ].sort_values(["OCCUPATION_LABEL", "YEAR", "QUARTER"]),
+        ],
         hide_index=True,
-        use_container_width=True,
+        width="stretch",
     )
 
     st.caption(
@@ -423,19 +683,10 @@ def render_ai_ml_cooccurrence_view() -> None:
             value=(0, len(quarter_options) - 1),
             format_func=lambda idx: quarter_options[idx],
         )
-        selected_ai_skills = st.multiselect(
-            "AI/ML skills",
-            options=sorted(ai_ml_pairs["AI_SKILL"].unique().tolist()),
-            default=[],
-            help="Leave empty to include all AI/ML skills found in the co-occurrence file.",
-        )
-        top_n = st.slider("Top skills", min_value=10, max_value=50, value=20, step=5)
 
     filtered = ai_ml_pairs[
         ai_ml_pairs["QUARTER_LABEL"].isin(quarter_options[selected_range[0] : selected_range[1] + 1])
     ]
-    if selected_ai_skills:
-        filtered = filtered[filtered["AI_SKILL"].isin(selected_ai_skills)]
 
     if filtered.empty:
         st.info("The current filters do not leave any AI/ML co-occurrence rows.")
@@ -443,15 +694,180 @@ def render_ai_ml_cooccurrence_view() -> None:
 
     summary = build_ai_ml_skill_summary(filtered)
     quarterly_ranks = build_ai_ml_quarterly_rank_data(filtered)
-    trend_skills = summary["OTHER_SKILL"].head(min(top_n, len(summary))).tolist()
-    trend_data = quarterly_ranks[quarterly_ranks["OTHER_SKILL"].isin(trend_skills)]
+    max_top_n = int(len(summary))
+
+    with st.sidebar:
+        top_n = int(
+            st.number_input(
+                "Top N skills",
+                min_value=1,
+                max_value=max_top_n,
+                value=min(20, max_top_n),
+                step=1,
+                help="Defines the ranked complementary-skill pool available for the line chart.",
+            )
+        )
+        top_ranked_skills = summary["OTHER_SKILL"].head(top_n).tolist()
+        selected_complementary_skills = st.multiselect(
+            "Complementary skills",
+            options=top_ranked_skills,
+            default=top_ranked_skills,
+            help="Choose which complementary skills from the current top-N ranking to plot.",
+        )
+
+    trend_data = quarterly_ranks[quarterly_ranks["OTHER_SKILL"].isin(selected_complementary_skills)]
+
+    if trend_data.empty:
+        st.info("Select at least one complementary skill to draw the rank trend.")
+        return
 
     st.subheader("Quarterly Rank Trend")
-    st.altair_chart(build_ai_ml_trend_chart(trend_data), use_container_width=True)
+    st.altair_chart(build_ai_ml_trend_chart(trend_data), width="stretch")
 
     st.caption(
-        f"Plotting the top {len(trend_skills):,} ranked skills from `{DATASCIENTIST_COOCCUR_PATH.name}`. "
+        f"Plotting {len(selected_complementary_skills):,} selected complementary skills from the top {top_n:,} ranks in `{DATASCIENTIST_COOCCUR_PATH.name}`. "
         "Mirrored pairs such as `A,B` and `B,A` are collapsed before ranking, and ranks are dense ranks computed from the deduped co-occurrence counts."
+    )
+
+
+def render_occupation_similarity_view() -> None:
+    st.subheader("Occupation Similarity")
+    st.caption(
+        "Builds quarter-specific SOC skill vectors from `skill_distributions2.csv`, places "
+        "transition occupations on a similarity-versus-Felten-exposure scatter plot, and uses the "
+        "selected point to show the biggest skill-share gaps."
+    )
+
+    missing_paths = [
+        path.name
+        for path in (SKILL_DISTRIBUTIONS_PATH, FELTEN_EXPOSURE_PATH)
+        if not path.exists()
+    ]
+    if missing_paths:
+        st.error(f"Missing required input file(s): {', '.join(missing_paths)}.")
+        return
+
+    skill_df = load_skill_distribution_data(SKILL_DISTRIBUTIONS_PATH)
+    exposure_df = load_felten_exposure_data(FELTEN_EXPOSURE_PATH)
+    if skill_df.empty:
+        st.warning(f"No rows were found in `{SKILL_DISTRIBUTIONS_PATH.name}`.")
+        return
+    if exposure_df.empty:
+        st.warning(f"No exposure rows were found in `{FELTEN_EXPOSURE_PATH.name}`.")
+        return
+
+    quarter_lookup = (
+        skill_df[["YEAR", "QUARTER", "QUARTER_LABEL"]]
+        .drop_duplicates()
+        .sort_values(["YEAR", "QUARTER"])
+        .reset_index(drop=True)
+    )
+    quarter_options = quarter_lookup["QUARTER_LABEL"].tolist()
+
+    with st.sidebar:
+        st.header("Controls")
+        quarter_label = st.selectbox(
+            "Quarter",
+            options=quarter_options,
+            index=len(quarter_options) - 1,
+        )
+
+    selected_quarter = quarter_lookup.loc[quarter_lookup["QUARTER_LABEL"] == quarter_label].iloc[0]
+    quarter_skill_data = build_quarter_skill_data(
+        skill_df,
+        year=int(selected_quarter["YEAR"]),
+        quarter=int(selected_quarter["QUARTER"]),
+    )
+    occupation_options = quarter_skill_data["SOC_LABEL"].drop_duplicates().sort_values().tolist()
+
+    with st.sidebar:
+        selected_occupation = st.selectbox(
+            "Occupation",
+            options=occupation_options,
+            index=0,
+        )
+
+    scatter_data = build_similarity_exposure_scatter_data(
+        quarter_skill_data=quarter_skill_data,
+        selected_occupation_label=selected_occupation,
+        exposure_df=exposure_df,
+    )
+    if scatter_data.empty:
+        st.info("No occupations with both shared skills and Felten exposure scores were found for this selection.")
+        return
+
+    selected_soc_code = quarter_skill_data.loc[
+        quarter_skill_data["SOC_LABEL"] == selected_occupation,
+        "SOC_CODE",
+    ].iloc[0]
+    selected_exposure_rows = exposure_df[exposure_df["SOC_CODE"] == selected_soc_code]
+    selected_exposure = (
+        float(selected_exposure_rows["LM_AIOE"].iloc[0]) if not selected_exposure_rows.empty else None
+    )
+
+    metric_1, metric_2, metric_3 = st.columns(3)
+    metric_1.metric("Transition occupations in plot", f"{len(scatter_data):,}")
+    metric_2.metric("Selected occupation LM AIOE", f"{selected_exposure:.3f}" if selected_exposure is not None else "Unavailable")
+    metric_3.metric("Best similarity", f"{scatter_data['COSINE_SIMILARITY'].max():.3f}")
+
+    st.subheader("Similarity vs AI Exposure")
+    event = st.altair_chart(
+        build_similarity_exposure_chart(scatter_data, selected_occupation_exposure=selected_exposure),
+        width="stretch",
+        on_select="rerun",
+        selection_mode="transition_select",
+        key="occupation_similarity_scatter",
+    )
+
+    selected_transition = extract_selected_occupation_from_event(
+        event,
+        valid_labels=scatter_data["SOC_LABEL"].tolist(),
+    )
+    if selected_transition is None:
+        st.info("Click a point in the scatter plot to inspect that transition occupation's skill gaps.")
+        return
+
+    selected_transition_row = scatter_data.loc[
+        scatter_data["SOC_LABEL"] == selected_transition
+    ].iloc[0]
+    gap_table = build_skill_gap_table(
+        quarter_skill_data,
+        selected_occupation_label=selected_occupation,
+        comparison_occupation_label=selected_transition,
+        top_n=10,
+    )
+    if gap_table.empty:
+        st.info("No skill-gap rows were available for the selected transition occupation.")
+        return
+
+    st.subheader("Selected Transition Occupation")
+    st.markdown(
+        f"**{selected_transition}**  \n"
+        f"Cosine similarity: {selected_transition_row['COSINE_SIMILARITY']:.3f} | "
+        f"LM AIOE: {selected_transition_row['LM_AIOE']:.3f} | "
+        f"Shared skills: {int(selected_transition_row['SHARED_SKILL_COUNT']):,}"
+    )
+    st.dataframe(
+        gap_table.rename(
+            columns={
+                "SKILL_NAME": "Skill",
+                "CNT_SELECTED": "Selected count",
+                "CNT_COMPARISON": "Transition count",
+                "SELECTED_SHARE": "Selected share",
+                "COMPARISON_SHARE": "Transition share",
+                "SHARE_GAP": "Share gap",
+                "ABS_SHARE_GAP": "Absolute share gap",
+                "GAP_DIRECTION": "More concentrated in",
+            }
+        ),
+        hide_index=True,
+        width="stretch",
+    )
+
+    st.caption(
+        f"Quarter: {quarter_label}. Selected occupation: {selected_occupation}. "
+        f"Felten exposure matches are available for {scatter_data['SOC_CODE'].nunique():,} transition occupations in this quarter. "
+        "Skill gaps are ranked by absolute difference in within-occupation skill share, not raw posting volume."
     )
 
 
@@ -472,8 +888,10 @@ def main() -> None:
 
     if view == "divergence":
         render_divergence_view()
-    else:
+    elif view == "ai_ml_cooccurrence":
         render_ai_ml_cooccurrence_view()
+    else:
+        render_occupation_similarity_view()
 
 
 if __name__ == "__main__":
