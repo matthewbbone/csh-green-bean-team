@@ -1,0 +1,11 @@
+[project]
+name = "csh-green-bean-team"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "python-dotenv>=1.2.2",
+    "snowflake-snowpark-python[modin]>=1.49.0",
+    "streamlit>=1.56.0",
+]
