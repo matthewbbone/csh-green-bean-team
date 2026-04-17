@@ -68,7 +68,7 @@ def load_agg(path: Path) -> pd.DataFrame:
     df["YEAR"] = df["YEAR"].astype(int)
     df["QUARTER"] = df["QUARTER"].astype(int)
     df["CNT"] = df["CNT"].astype(int)
-    df["time_ord"] = df["YEAR"] * 10 + df["QUARTER"]
+    df["time_ord"] = df["YEAR"] * 4 + df["QUARTER"]
     df["period"] = df["YEAR"].astype(str) + "-Q" + df["QUARTER"].astype(str)
     quarter_start_month = (df["QUARTER"] - 1) * 3 + 1
     df["QUARTER_START"] = pd.to_datetime(
@@ -137,7 +137,9 @@ def add_event_markers(fig: go.Figure) -> None:
         )
 
 
-def line_chart(agg: pd.DataFrame, dim_col: str, selected: list[str], metric: str) -> go.Figure:
+def line_chart(
+    agg: pd.DataFrame, dim_col: str, selected: list[str], metric: str
+) -> go.Figure:
     fig = go.Figure()
     for name in selected:
         sub = (
@@ -150,7 +152,9 @@ def line_chart(agg: pd.DataFrame, dim_col: str, selected: list[str], metric: str
         if metric == "Relative growth (%)":
             baseline = sub["CNT"].iloc[0] if not sub.empty else None
             y_vals = (sub["CNT"] / baseline - 1) * 100 if baseline else sub["CNT"] * 0
-            hover = "<b>%{fullData.name}</b><br>%{x}<br>Growth: %{y:+.1f}%<extra></extra>"
+            hover = (
+                "<b>%{fullData.name}</b><br>%{x}<br>Growth: %{y:+.1f}%<extra></extra>"
+            )
         else:
             baseline = sub["CNT"].iloc[0] if not sub.empty else 0
             y_vals = sub["CNT"] - baseline
@@ -183,7 +187,9 @@ def line_chart(agg: pd.DataFrame, dim_col: str, selected: list[str], metric: str
 
 @st.cache_data(show_spinner="Computing slopes...")
 def compute_slopes(agg: pd.DataFrame, group_col: str) -> pd.DataFrame:
-    grouped = agg.groupby([group_col, "time_ord"], observed=True)["CNT"].sum().reset_index()
+    grouped = (
+        agg.groupby([group_col, "time_ord"], observed=True)["CNT"].sum().reset_index()
+    )
     grouped["xy"] = grouped["time_ord"] * grouped["CNT"]
     grouped["xx"] = grouped["time_ord"] ** 2
     slopes = grouped.groupby(group_col, observed=True).agg(
@@ -194,32 +200,99 @@ def compute_slopes(agg: pd.DataFrame, group_col: str) -> pd.DataFrame:
         sum_xy=("xy", "sum"),
     )
     denom = slopes["n"] * slopes["sum_xx"] - slopes["sum_x"] ** 2
-    slopes["slope"] = (slopes["n"] * slopes["sum_xy"] - slopes["sum_x"] * slopes["sum_y"]) / denom
-    return slopes["slope"].reset_index().rename(columns={group_col: "name"})
+    slopes["slope"] = (
+        slopes["n"] * slopes["sum_xy"] - slopes["sum_x"] * slopes["sum_y"]
+    ) / denom
+    slopes["mean_y"] = slopes["sum_y"] / slopes["n"]
+    slopes["normalized_slope"] = slopes["slope"] / slopes["mean_y"] * 100
+    slopes["intercept"] = (
+        slopes["sum_y"] - slopes["slope"] * slopes["sum_x"]
+    ) / slopes["n"]
+    return (
+        slopes[["slope", "normalized_slope", "intercept"]]
+        .reset_index()
+        .rename(columns={group_col: "name"})
+    )
 
 
-def slope_bar_chart(slopes: pd.DataFrame, title: str, top_n: int = 50, flop: bool = False) -> go.Figure:
+def slope_bar_chart(
+    slopes: pd.DataFrame,
+    title: str,
+    top_n: int = 50,
+    flop: bool = False,
+    col: str = "slope",
+) -> go.Figure:
     top = (
-        slopes.nsmallest(top_n, "slope").sort_values("slope", ascending=True)
+        slopes.nsmallest(top_n, col).sort_values(col, ascending=True)
         if flop
-        else slopes.nlargest(top_n, "slope").sort_values("slope", ascending=False)
+        else slopes.nlargest(top_n, col).sort_values(col, ascending=False)
     )
     color = "tomato" if flop else "steelblue"
+    if col == "normalized_slope":
+        x_label = "Normalized slope (% of mean CNT / quarter)"
+        hover = "%{y}<br>Slope: %{x:+.2f}%/qtr<extra></extra>"
+    else:
+        x_label = "OLS slope (CNT / quarter)"
+        hover = "%{y}<br>Slope: %{x:,.1f}<extra></extra>"
     fig = go.Figure(
         go.Bar(
-            x=top["slope"],
+            x=top[col],
             y=top["name"],
             orientation="h",
             marker_color=color,
-            hovertemplate="%{y}<br>Slope: %{x:,.1f}<extra></extra>",
+            hovertemplate=hover,
         )
     )
     fig.update_layout(
         title=title,
-        xaxis_title="OLS slope (CNT / quarter)",
+        xaxis_title=x_label,
         yaxis_title=None,
         height=max(420, top_n * 22),
         margin=dict(l=10, r=20, t=50, b=40),
+    )
+    return fig
+
+
+def debug_slope_scatter(
+    agg: pd.DataFrame, slopes: pd.DataFrame, dim_col: str, name: str
+) -> go.Figure:
+    sub = (
+        agg[agg[dim_col] == name]
+        .groupby(["time_ord", "period"], observed=True)["CNT"]
+        .sum()
+        .reset_index()
+        .sort_values("time_ord")
+    )
+    row = slopes[slopes["name"] == name].iloc[0]
+    fit_y = row["slope"] * sub["time_ord"] + row["intercept"]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=sub["period"],
+            y=sub["CNT"],
+            mode="markers",
+            name="Actual CNT",
+            hovertemplate="%{x}<br>CNT: %{y:,}<extra></extra>",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=sub["period"],
+            y=fit_y,
+            mode="lines",
+            name=f"OLS fit (slope={row['slope']:,.1f}, {row['normalized_slope']:+.2f}%/qtr)",
+            line=dict(dash="dash"),
+            hovertemplate="%{x}<br>Fit: %{y:,.0f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=name,
+        xaxis_title="Quarter",
+        yaxis_title="CNT",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        height=420,
+        margin=dict(t=80),
     )
     return fig
 
@@ -265,7 +338,11 @@ def render_skill_distributions_view() -> None:
             key="app3_skill_dist_dimension",
         )
         dim_col, dim_options = dimensions[dim_label]
-        preselect = [value for value in default_selection if value in dim_options] if dim_label == default_dimension else []
+        preselect = (
+            [value for value in default_selection if value in dim_options]
+            if dim_label == default_dimension
+            else []
+        )
         selected = st.multiselect(
             f"Select {dim_label.lower()}(s)",
             options=dim_options,
@@ -306,20 +383,46 @@ def render_skill_distributions_view() -> None:
             step=5,
             key="app3_top_n",
         )
+        slope_metric = st.radio(
+            "Slope metric",
+            ["Normalized (% / quarter)", "Raw (CNT / quarter)"],
+            key="app3_slope_metric",
+        )
 
     slope_dim_col = dimensions[slope_dim_label][0]
     slopes = compute_slopes(agg, slope_dim_col)
+    slope_col = "normalized_slope" if slope_metric.startswith("Normalized") else "slope"
     col_top, col_flop = st.columns(2)
     with col_top:
         st.plotly_chart(
-            slope_bar_chart(slopes, f"Top {top_n} {slope_dim_label.lower()}s", top_n),
+            slope_bar_chart(
+                slopes, f"Top {top_n} {slope_dim_label.lower()}s", top_n, col=slope_col
+            ),
             use_container_width=True,
         )
     with col_flop:
         st.plotly_chart(
-            slope_bar_chart(slopes, f"Flop {top_n} {slope_dim_label.lower()}s", top_n, flop=True),
+            slope_bar_chart(
+                slopes,
+                f"Flop {top_n} {slope_dim_label.lower()}s",
+                top_n,
+                flop=True,
+                col=slope_col,
+            ),
             use_container_width=True,
         )
+
+    with st.expander("Inspect slope fit"):
+        debug_name = st.selectbox(
+            f"Select {slope_dim_label.lower()}",
+            options=slopes.sort_values("name")["name"].tolist(),
+            key="app3_debug_name",
+        )
+        if debug_name:
+            st.plotly_chart(
+                debug_slope_scatter(agg, slopes, slope_dim_col, debug_name),
+                use_container_width=True,
+            )
 
 
 def main() -> None:
