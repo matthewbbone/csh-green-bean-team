@@ -113,8 +113,7 @@ W_{ij} =
 \frac{1}{T}
 \sum_{t=0}^{T}
 \left(
-\sum_{p \in P_{jt}} \frac{w_{pt}}{\|P_{jt}\|}
--
+\sum_{p \in P_{jt}} \frac{w_{pt}}{\|P_{jt}\|}-
 \sum_{p \in P_{it}} \frac{w_{pt}}{\|P_{it}\|}
 \right)
 $$
