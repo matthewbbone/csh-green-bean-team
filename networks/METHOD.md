@@ -2,15 +2,15 @@
 
 The following occupational networks build on work presented by Mealy (2018), who created a labour flow network and skill similarity network of occupations in the United States. In their paper, they show that the overlap between occupational tasks is positively correlated with the probability of transitioning between occupations. They found that, of all occupational attributes in the O*NET database, intermediate work activities could explain the most variance in occupational transitions. For the United States, overlap in intermediate work activities could account for 9% of the variance in occupational transitions.
 
-I build on this work by creating a labour flow network for the UK and mapping O*NET's intermediate work activities to the UK's SOC occupational taxonomy. I also create occupational networks that capture geographic and industrial similarity, as well as wage and unemployment differences. These additional factors can help explain additional variance in occupational transitions.
+I build on this work by creating a labour flow network for the UK and mapping O*NET's intermediate work activities to the UK's SOC occupational taxonomy. I also create occupational networks that capture geographic and industrial similarity. These additional factors can help explain additional variance in occupational transitions.
 
-The two primary datasets I use to construct the occupation networks in this thesis are the UK Household Longitudinal Study and the O*NET database. In addition to these sources, I use the Labour Market Information for All API, developed by the UK Department for Education, to get yearly estimates for occupational unemployment derived from the UK Labour Force Survey.
+The two primary datasets I use to construct the occupation networks in this thesis are the UK Household Longitudinal Study and the O*NET database.
 
-The UKHLS is a comprehensive study of approximately 40,000 households that has been administered annually throughout the UK since 2009. In particular, I use Waves 3–12, covering 2011–2022, of unweighted data for individuals over the age of 16 to construct networks for occupational labour flows ($L$), geographic similarity ($G$), industrial similarity ($N$), and wage differences ($W$).
+The UKHLS is a comprehensive study of approximately 40,000 households that has been administered annually throughout the UK since 2009. In particular, I use Waves 3–12, covering 2011–2022, of unweighted data for individuals over the age of 16 to construct networks for occupational labour flows ($L$), geographic similarity ($G$), and industrial similarity ($N$)).
 
-O*NET is a database developed by the US Department of Labor with a comprehensive list of occupations, related working activities, and other details. It has been used extensively to better understand the relationship between occupations, skills, and shifts in labour demand. I link O*NET occupations to the UK's Standard Occupational Classification (SOC) codes to create a skill similarity network ($S$), using the mapping provided by the Labour Market for All API.
+O\*NET is a database developed by the US Department of Labor with a comprehensive list of occupations, related working activities, and other details. It has been used extensively to better understand the relationship between occupations, skills, and shifts in labour demand. I link O\*NET occupations to the UK's Standard Occupational Classification (SOC) codes to create a skill similarity network ($S$), using the mapping provided by the Labour Market for All API.
 
-All of these networks, as well as the pairwise differences in unemployment ($U$) and wage ($W$), are built with SOC 3-digit occupations as their nodes. The labour flow network is used to fit the labour flow model from del Rio-Chanon (2021), while the skill, geography, industry, and wage-difference networks are used to represent transition costs in the heuristic function for determining the optimal retraining policy. Additionally, I regress the latter networks and the unemployment data on the labour flow network to determine which factors are most strongly correlated with occupational transitions.
+All of these networks are built with SOC 3-digit occupations as their nodes. The labour flow network is used to fit the labour flow model from del Rio-Chanon (2021), while the skill, geography, and industry networks are used to represent transition costs in the heuristic function for determining the optimal retraining policy. Additionally, I regress the latter networks on the labour flow network to determine which factors are most strongly correlated with occupational transitions.
 
 ### Labour Flow Network
 
@@ -103,36 +103,3 @@ N_{ij} = \frac{B_i \cdot B_j}{\|B_i\| \|B_j\|}
 $$
 
 Since this network is based on 88 SIC sectors, there is substantial heterogeneity across occupations, and most occupations are dissimilar, with most values of $N_{ij} < 0.2$.
-
-### Pairwise Wage Differences
-
-Wages are derived from the UKHLS dataset by taking the average wage observed for each individual $p \in P_{it}$ in occupation $i$ at time $t$, across all years. This means individuals are counted multiple times, even if they stay in the same occupation. We denote the wage of an individual $p$ at time $t$ as $w_{pt}$.
-
-$$
-W_{ij} =
-\frac{1}{T}
-\sum_{t=0}^{T}
-\left(
-\sum_{p \in P_{jt}} \frac{w_{pt}}{\|P_{jt}\|}-
-\sum_{p \in P_{it}} \frac{w_{pt}}{\|P_{it}\|}
-\right)
-$$
-
-where $P_{it}$ is the set of individuals at time $t$ who are in occupation $i$. This network is then min-max normalized to fit on $[0,1]$ like the rest of the networks.
-
-Since the network is symmetric, meaning $W_{ij} = -W_{ji}$, $W_{ij} = 0.5$ implies that the origin occupation $i$ and target occupation $j$ have the same wage levels. When $W_{ij} < 0.5$, the origin occupation $i$ has higher wages; when $W_{ij} > 0.5$, the target occupation $j$ has higher wages.
-
-### Pairwise Unemployment Differences
-
-For pairwise differences in unemployment, I get the yearly unemployment rates for each SOC 3-digit occupation from the Labour Market for All API, which are estimated from the Labour Force Survey. I denote this rate as $u_{it}$.
-
-$$
-U_{ij} =
-\frac{1}{T}
-\sum_{t=0}^{T}
-(u_{jt} - u_{it})
-$$
-
-where $T$ is the number of years for which we have data for both $u_i$ and $u_j$. The final matrix is then normalized by dividing by the maximum absolute value in $U_{ij}$.
-
-Similar to the wage differences, this is min-max normalized to fit on $[0,1]$ and has a similar interpretation to the wage network. When $U_{ij} < 0.5$, the origin occupation $i$ has higher unemployment; when $U_{ij} > 0.5$, the target occupation $j$ has higher unemployment.
